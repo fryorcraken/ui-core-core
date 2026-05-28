@@ -1,0 +1,7 @@
+class AppUi
+{
+    PROP(bool storageStarted READWRITE)
+    PROP(bool storageConnected READWRITE)
+    PROP(bool deliveryStarted READWRITE)
+    PROP(bool deliveryConnected READWRITE)
+}

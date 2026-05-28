@@ -1,0 +1,23 @@
+{
+  "name": "app_core",
+  "version": "0.1.0",
+  "type": "core",
+  "category": "general",
+  "description": "Core module wrapping storage_module and delivery_module for the status UI",
+  "main": "app_core_plugin",
+  "dependencies": ["storage_module", "delivery_module"],
+
+  "nix": {
+    "packages": {
+      "build": [],
+      "runtime": []
+    },
+    "external_libraries": [],
+    "cmake": {
+      "find_packages": [],
+      "extra_sources": [],
+      "extra_include_dirs": [],
+      "extra_link_libraries": []
+    }
+  }
+}
