@@ -16,6 +16,14 @@ The **authoritative source** for module authoring is `logos-co/logos-tutorial` a
 - [Part 1 — Wrapping a C library](https://github.com/logos-co/logos-tutorial/blob/tutorial-v2/tutorial-wrapping-c-library.md) — core modules
 - [Part 3 — C++ UI module](https://github.com/logos-co/logos-tutorial/blob/tutorial-v2/tutorial-cpp-ui-app.md) — **this project's UI pattern**: QML view + C++ backend, scaffolded from the `#ui-qml-backend` template, running in an isolated `ui-host` process. **Not** the QML-only pattern from Part 2.
 
+The **authoritative source** for the storage and delivery module APIs is `logos-co/logos-docs` — currently in open PRs (not yet merged to main):
+
+- [PR #166 — feat: initial documentation for Logos Storage](https://github.com/logos-co/logos-docs/pull/166) — the storage module's `Q_INVOKABLE` surface and lifecycle (`init` → `start` → events).
+- [PR #226 — feat: use logos-delivery-module journey](https://github.com/logos-co/logos-docs/pull/226) — the delivery module's API surface, `createNode` config schema, and event payloads (including `connectionStateChanged`, which this project subscribes to).
+- [PR #284 — storage docs follow-up](https://github.com/logos-co/logos-docs/pull/284) — supersedes parts of #166; check before relying on #166 alone.
+
+Because these are open PRs, the documented APIs may shift before merge. Re-fetch them before extending the storage or delivery integration.
+
 `logos-co/scaffold` (the `lgs` CLI) is **not** authoritative for module authoring; see `docs/findings/lgs-vs-tutorial-v2.md` for an instance where its rules diverge.
 
 ## Prerequisites
