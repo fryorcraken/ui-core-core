@@ -14,8 +14,7 @@ The **authoritative source** for module authoring is `logos-co/logos-tutorial` a
 
 - [Developer guide](https://github.com/logos-co/logos-tutorial/blob/tutorial-v2/logos-developer-guide.md) — module structure (Part 1), metadata fields (§1.3), module dependencies (§9.2), inter-module communication (§8)
 - [Part 1 — Wrapping a C library](https://github.com/logos-co/logos-tutorial/blob/tutorial-v2/tutorial-wrapping-c-library.md) — core modules
-- [Part 2 — QML UI app](https://github.com/logos-co/logos-tutorial/blob/tutorial-v2/tutorial-qml-ui-app.md) — QML-only UI
-- [Part 3 — C++ UI module](https://github.com/logos-co/logos-tutorial/blob/tutorial-v2/tutorial-cpp-ui-app.md) — **this project's pattern**: QML view + C++ backend in a separate `ui-host` process
+- [Part 3 — C++ UI module](https://github.com/logos-co/logos-tutorial/blob/tutorial-v2/tutorial-cpp-ui-app.md) — **this project's UI pattern**: QML view + C++ backend, scaffolded from the `#ui-qml-backend` template, running in an isolated `ui-host` process. **Not** the QML-only pattern from Part 2.
 
 `logos-co/scaffold` (the `lgs` CLI) is **not** authoritative for module authoring; see `docs/findings/lgs-vs-tutorial-v2.md` for an instance where its rules diverge.
 
