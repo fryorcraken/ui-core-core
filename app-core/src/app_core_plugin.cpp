@@ -24,9 +24,14 @@ AppCorePlugin::~AppCorePlugin()
 void AppCorePlugin::initLogos(LogosAPI* logosAPIInstance)
 {
     traceLog("initLogos called");
+    if (!logosAPIInstance) { traceLog("initLogos: api is null, returning"); return; }
+    // Assign the inherited PluginInterface::logosAPI member — Part 1 §troubleshooting
+    // calls this the "global" pointer; it's actually a public field on PluginInterface.
+    // The SDK relies on it for event routing / inter-module calls. Keep m_logosAPI
+    // too in case any local code reads it.
+    logosAPI = logosAPIInstance;
     m_logosAPI = logosAPIInstance;
-    if (!m_logosAPI) { traceLog("initLogos: api is null, returning"); return; }
-    m_logos = new LogosModules(m_logosAPI);
+    m_logos = new LogosModules(logosAPIInstance);
     qDebug() << "app_core: initLogos start";
     traceLog("initLogos: m_logos created");
 
@@ -44,7 +49,7 @@ void AppCorePlugin::initLogos(LogosAPI* logosAPIInstance)
     // Also subscribe to connectionStateChanged — when the node actually peers up,
     // delivery emits it with status="Connected" and that's the authoritative signal.
     const QString deliveryCfg = QStringLiteral(
-        R"({"logLevel":"INFO","mode":"Core","preset":"logos.dev"})");
+        R"({"logLevel":"DEBUG","mode":"Core","preset":"logos.dev"})");
 
     m_logos->delivery_module.on("connectionStateChanged",
         [this](const QVariantList& data) {
@@ -57,15 +62,23 @@ void AppCorePlugin::initLogos(LogosAPI* logosAPIInstance)
         });
     traceLog("delivery: subscribed to connectionStateChanged");
 
+    // Sync createNode/start blocks initLogos for ~21s and the standalone-app's ui-host
+    // ready-handshake times out at 10s, so app_ui never loads. Use async with the
+    // extended Timeout(60000) so initLogos returns immediately. NB: LogosResult::getError()
+    // throws when success=true, so only read it on failure.
     traceLog("delivery.createNodeAsync calling");
     m_logos->delivery_module.createNodeAsync(deliveryCfg,
         [this](LogosResult createRes) {
-            traceLog(QString("delivery.createNode cb success=%1").arg(createRes.success));
-            if (!createRes.success) { traceLog("createNode failed"); return; }
+            traceLog(QString("delivery.createNode cb success=%1%2")
+                     .arg(createRes.success)
+                     .arg(createRes.success ? "" : QString(" error=%1").arg(createRes.getError())));
+            if (!createRes.success) return;
             m_logos->delivery_module.startAsync(
                 [this](LogosResult startRes) {
-                    traceLog(QString("delivery.start cb success=%1").arg(startRes.success));
-                    // Don't override m_deliveryStarted here — the event is authoritative.
+                    traceLog(QString("delivery.start cb success=%1%2")
+                             .arg(startRes.success)
+                             .arg(startRes.success ? "" : QString(" error=%1").arg(startRes.getError())));
+                    // Don't override m_deliveryStarted here — connectionStateChanged is authoritative.
                     emit eventResponse("statusChanged", QVariantList{});
                 },
                 Timeout(60000));

@@ -12,18 +12,17 @@ AppUiPlugin::~AppUiPlugin()
 
 void AppUiPlugin::initLogos(LogosAPI* api)
 {
+    logosAPI = api;
     m_logosAPI = api;
-    if (m_logosAPI) {
-        m_logos = new LogosModules(m_logosAPI);
+    if (api) {
+        m_logos = new LogosModules(api);
     }
     setBackend(this);
 
     if (!m_logos) return;
 
-    // Subscribe to app_core's statusChanged event; refresh PROPs whenever it fires.
-    // Followed by one initial pull so the first paint isn't blank if statusChanged
-    // already fired before we subscribed.
     m_logos->app_core.on("statusChanged", [this](const QVariantList&) {
+        qDebug() << "app_ui: statusChanged event received";
         refresh();
     });
     refresh();
@@ -33,8 +32,8 @@ void AppUiPlugin::initLogos(LogosAPI* api)
 void AppUiPlugin::refresh()
 {
     if (!m_logos) return;
-    m_logos->app_core.storageStartedAsync(  [this](bool v){ setStorageStarted(v); });
-    m_logos->app_core.storageConnectedAsync([this](bool v){ setStorageConnected(v); });
-    m_logos->app_core.deliveryStartedAsync( [this](bool v){ setDeliveryStarted(v); });
-    m_logos->app_core.deliveryConnectedAsync([this](bool v){ setDeliveryConnected(v); });
+    m_logos->app_core.storageStartedAsync(  [this](bool v){ qDebug() << "app_ui: storageStarted ="   << v; setStorageStarted(v); });
+    m_logos->app_core.storageConnectedAsync([this](bool v){ qDebug() << "app_ui: storageConnected =" << v; setStorageConnected(v); });
+    m_logos->app_core.deliveryStartedAsync( [this](bool v){ qDebug() << "app_ui: deliveryStarted ="  << v; setDeliveryStarted(v); });
+    m_logos->app_core.deliveryConnectedAsync([this](bool v){ qDebug() << "app_ui: deliveryConnected="<< v; setDeliveryConnected(v); });
 }

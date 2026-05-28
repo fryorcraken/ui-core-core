@@ -80,7 +80,7 @@ What happens on launch:
 5. QML calls `logos.module("app_ui")` to get the typed replica; the four `Q_PROPERTY` bools auto-sync over Qt Remote Objects.
 6. `app_core::initLogos` starts storage (sync) and delivery (async, with a 60-second timeout); on each state change it emits `statusChanged`; `app_ui`'s backend subscribes to that event and refreshes the PROPs.
 
-Expected first paint: `Storage: started=? connected=?  Delivery: started=? connected=?` then transitions to `yes`/`no` per actual state.
+Expected first paint: `Storage: started=? connected=?  Delivery: started=? connected=?` then transitions to `Storage: yes/yes  Delivery: no/no`. Delivery stays at `no/no` because of the upstream bugs documented under "What we observe at runtime" below — the node is actually peering up, but the SDK never tells the UI.
 
 ### Live-editing QML
 
@@ -135,11 +135,54 @@ ui-core-core/
     └── ideas/logos-status-app.md
 ```
 
+## What we observe at runtime
+
+After running the app end-to-end (see trace log + delivery DEBUG logs):
+
+- **Storage:** `started=yes`, `connected=yes`. `storage_module.init("{}")` and `storage_module.start()` both return `true` in ~20ms. Cross-module IPC `app_core → app_ui` works: `app_ui` calls `storageStartedAsync` and gets the real value back, which paints to the QML UI.
+- **Delivery:** `started=no`, `connected=no` — **even though the delivery node is fully operational** (host stdout shows it sending and receiving relay messages with multiple peers within seconds of launch). Two upstream bugs explain why the UI doesn't reflect that:
+  1. `delivery_module.start()` returns `success=false` after exactly 60s on a working node (matches our `Timeout(60000)`). Returns false in 20s if we leave the SDK default timeout.
+  2. `connectionStateChanged` — documented in `logos-docs` PR #226 §3.1 as the authoritative liveness signal — **is never emitted** by `logos-delivery-module@v0.1.x`. We subscribed before `createNode`, waited 90+ seconds with the node actively relaying traffic, got no events.
+
+The cross-module event lane works (proven by storage). The signals the delivery module is supposed to send don't fire. That's the bug, not anything in this app.
+
 ## Deviations from the tutorial-v2 docs
 
 Everything below diverges from the documented patterns. Some are workarounds for upstream issues; some are intentional simplifications. Listed for honesty, and so future maintainers (or upstream PR reviewers) can decide whether to fold the fixes back into the docs or back out our workarounds.
 
-### 1. Synchronous `init()` + `start()` for `storage_module` (`app_core/src/app_core_plugin.cpp`)
+### 1. Assign the inherited `PluginInterface::logosAPI` field in `initLogos`
+
+**Doc says** (Part 1 §troubleshooting): *"check that `initLogos` assigns to the **global** `logosAPI` variable (defined in the Logos SDK / liblogos), not to a class member like `m_logosAPI`."*
+
+**Reality**: there is no global `logosAPI` symbol in any SDK header. The "global" the doc means is actually a public field on `PluginInterface` itself:
+
+```cpp
+// liblogos-headers/include/interface.h
+class PluginInterface {
+public:
+    // ...
+    LogosAPI* logosAPI = nullptr;   // ← this is what Part 1 calls "the global"
+};
+```
+
+Every plugin that inherits `PluginInterface` (transitively, via its module-specific interface header) has this field. The SDK uses it for event routing and inter-module calls.
+
+**We do**: assign it in `initLogos` for both `app_core` and `app_ui`:
+
+```cpp
+void AppCorePlugin::initLogos(LogosAPI* logosAPIInstance) {
+    logosAPI = logosAPIInstance;   // inherited from PluginInterface
+    m_logosAPI = logosAPIInstance; // local convenience copy
+    m_logos = new LogosModules(logosAPIInstance);
+    // ...
+}
+```
+
+**Symptom of getting this wrong**: `app_core::initLogos` runs and emits `statusChanged`, but `app_ui`'s subscription to `app_core.on("statusChanged", ...)` never fires — so the UI shows `?` forever even though storage is fine. Setting the inherited field fixed the cross-module event flow for us.
+
+**Upstream**: the Part 1 troubleshooting text is misleading. There is no "global variable in liblogos"; it's a base-class field. Part 3's Step 5 example also doesn't show it being assigned and doesn't warn about it. Worth a tutorial PR.
+
+### 2. Synchronous `init()` + `start()` for `storage_module` (`app_core/src/app_core_plugin.cpp`)
 
 **Doc says** (developer guide §8.2):
 
@@ -147,41 +190,41 @@ Everything below diverges from the documented patterns. Some are workarounds for
 
 **We do**: call `storage_module.init(cfg)` and `storage_module.start()` synchronously inside `app_core::initLogos`.
 
-**Why**: storage's calls return in ~20ms in practice, well below the default 20s IPC timeout. The simpler sync code is fine here.
+**Why**: storage's calls return in ~20ms in practice. Sync is fine and keeps the code simple. The standalone-app's ui-host ready handshake has a 10s ceiling, so anything in `initLogos` that runs sub-second is safe.
 
-**Risk**: if storage ever gets slower (a real connect-to-network step would push it past 20s), this will silently fail with `start() → false`. Migrate to async if that happens.
+### 3. Asynchronous `createNodeAsync()` + `startAsync()` for `delivery_module` with `Timeout(60000)`
 
-### 2. Asynchronous `createNode()` + `start()` for `delivery_module` with extended `Timeout(60000)`
+**Doc shows** (PR #226 §3.6): *"All lifecycle calls (`createNode`, `start`, `stop`, `subscribe`, `unsubscribe`, `send`) are synchronous and return `LogosResult`."*
 
-**Doc shows**: sync `delivery_module.createNode(cfg)` and `delivery_module.start()` returning `LogosResult`.
+**We do**: async variants with `Timeout(60000)` instead of the documented sync path.
 
-**We do**: async variants with an explicit 60-second IPC timeout instead of the default 20s.
+**Why** (verified by running the documented sync path once for comparison): `delivery_module.start()` blocks for exactly 20s in sync mode, then returns `success=false`. That's longer than the standalone-app's 10s ui-host ready timeout — so `app_ui` fails to load (the user sees "Failed to load UI plugin" before they ever see the status screen). The async variant returns `initLogos` immediately and lets `app_ui`'s ui-host complete its handshake, so the UI loads even though delivery is still spinning up.
 
-**Why**: `delivery_module.start()` does a full nwaku/libp2p node startup which takes ~20s. The default 20s IPC timeout in the SDK fires before delivery returns, and we get a misleading `success=false` from a node that actually started fine. Custom `Timeout(60000)` gives nwaku enough headroom.
+**Note on the `Timeout(60000)`**: the SDK accepts the longer timeout and honors it (we see the `startAsync` callback fire at exactly 60s instead of 20s), but the outcome is the same — `success=false` regardless of timeout. The `Timeout` parameter is not in the developer-guide docs but is present in the generated `delivery_module_api.h`. The longer timeout is mostly cosmetic; deviation #4 below is what actually drives the visible status.
 
-**Upstream**: the dev guide doesn't mention this timing characteristic of delivery, and doesn't document when to override the default timeout. Worth a PR to either lengthen the SDK default or document the override pattern.
+### 4. Delivery "started"/"connected" intended to come from `connectionStateChanged` event — currently produces `no` because the event never fires
 
-### 3. Delivery "started"/"connected" sourced from `connectionStateChanged` event, not `start()` return value
+**Doc shows** (PR #226 §3.1): subscribe to `connectionStateChanged` and treat the first non-empty status string as "node is up". *"Wire your handlers **before** `start()` so you don't miss the first `connectionStateChanged` event."*
 
-**Doc shows**: `delivery_module.start()` returns `LogosResult{success: bool}`; the bool indicates whether the node started.
+**We do**: subscribe before `createNodeAsync` (line 49 vs 61 in `app_core_plugin.cpp`). On `connectionStateChanged` with `status == "Connected"`, set `m_deliveryStarted = true`.
 
-**We do**: subscribe to `delivery_module`'s `connectionStateChanged` event and treat `status == "Connected"` as truthy for both `deliveryStarted` and `deliveryConnected`. The `start()` callback fires but its `success` value is ignored.
+**Observed**: the handler **never fires**, even over 90+ seconds with the delivery node actively relaying messages to four+ peers. We see `delivery.createNode cb success=1`, the delivery DEBUG log shows peers being added, relay messages flowing — and our `connectionStateChanged` handler logs nothing. `m_deliveryStarted` stays `false`, so the UI shows `no/no`.
 
-**Why**: see (2) — `start()` returns false on timeout even when the node is up. The `connectionStateChanged` event fires when delivery actually peers up to the network (`logos.dev` cluster) and is the authoritative liveness signal. This event is documented in `logos-docs` PR #226 (delivery API journey).
+**Why we still keep this code**: when the upstream bug is fixed, this is the right path. Falling back to `start()`'s success bool (#3) would also report `false` (also wrong), so there's no better local workaround.
 
-**Risk**: `connectionStateChanged` is in an open docs PR, not in merged docs. The event name/payload could change.
+**Upstream**: the `connectionStateChanged` event documented in PR #226 is not emitted by `logos-delivery-module@v0.1.x` under default config. Either the event is implemented under a different name in the shipped binary, or the implementation was never wired up. Either way, the doc and the binary disagree. **File against `logos-co/logos-delivery-module`.**
 
-### 4. Storage "connected" indicator reuses the `start()` bool
+### 5. Storage "connected" indicator reuses the `start()` bool
 
 **Doc says**: nothing — storage's "connected" semantics aren't defined in any merged doc.
 
 **We do**: `app_core::storageConnected()` returns the same value as `storageStarted()`.
 
-**Why**: spec called for a separate "connected" indicator per module. Delivery has `connectionStateChanged`; storage does not (per `logos-co/logos-storage-module@v0.3.2`'s `storage_module_plugin.h`, only `storageStart`/`storageStop`/upload/download events exist — no peer-connected event). Treating `start() bool` as "connected" is the simplest defensible choice for an MVP. The doc/upstream has no preferred answer here.
+**Why**: spec called for a separate "connected" indicator per module. Delivery's planned `connectionStateChanged` doesn't have a storage equivalent (per `logos-co/logos-storage-module@v0.3.2`'s `storage_module_plugin.h`, only `storageStart`/`storageStop`/upload/download events exist — no peer-connected event). Treating `start() bool` as "connected" is the simplest defensible choice for an MVP.
 
 **Upstream**: worth filing a question/PR on whether storage should expose a peer-count or peer-connected event.
 
-### 5. Peer-count indicator removed from spec
+### 6. Peer-count indicator removed from spec
 
 **Original spec**: three indicators per module — started, connected, peers.
 
@@ -189,41 +232,25 @@ Everything below diverges from the documented patterns. Some are workarounds for
 
 **Why**: neither `storage_module` (v0.3.2) nor `delivery_module` (v0.1.2) exposes a peer-count `Q_INVOKABLE` or event-payload field. `delivery_module` has `getNodeInfo()` which *might* contain a peer count under one of its identifiers — undocumented. Rather than probe, we cut the indicator.
 
-**Risk**: trivial. The architecture supports adding it later if `getNodeInfo` or a future upstream API exposes it.
+### 7. Storage `init("{}")` — empty config, not the canonical one
 
-### 6. Storage `init("{}")` — empty config, not the canonical one
-
-**Doc/canonical config** at `logos-co/node-configs/storage_config.json` includes `listen-addrs`, `data-dir`, `disc-port`, etc.
+**Doc/canonical config** at `logos-co/node-configs/storage_config.json` includes `listen-addrs`, `data-dir`, `disc-port`, etc. PR #284's revised tutorial passes a populated config.
 
 **We do**: pass `"{}"` and let storage use defaults.
 
-**Why**: the canonical config triggers `Unexpected field 'listen-addrs' while deserializing StorageConf*` at the underlying Nim deserializer. The schema in the shipped binary doesn't match the documented JSON. Empty config bypasses the mismatch.
+**Why**: the canonical config triggered `Unexpected field 'listen-addrs' while deserializing StorageConf*` at the underlying Nim deserializer in earlier testing. The schema in the shipped binary didn't match the documented JSON. Empty config bypasses the mismatch.
 
-**Upstream**: real bug — the canonical config file and the deserializer schema are out of sync. The shipped binary on `main` rejects the field that the publish-side docs say is required. File on `logos-co/logos-storage-module` or `logos-co/node-configs`.
-
-### 7. Defer `initLogos` setup to `QTimer::singleShot(0, ...)`
-
-**Doc shows** (`tutorial-cpp-ui-app.md` Step 5): `initLogos()` is synchronous — store the `LogosAPI*`, construct `LogosModules`, call `setBackend(this)`, done.
-
-**We do**: in **early iterations** of `app_ui_plugin`, the initial `refresh()` call ran inside `initLogos` and made a synchronous remote call to `app_core`, which blocked the ui-host's ready handshake. The standalone-app then timed out waiting for ui-host ready (10s) and showed "Failed to load UI plugin". Wrapping the first refresh in `QTimer::singleShot(0, this, [this]{ refresh(); })` let `initLogos` return immediately and the handshake completed.
-
-**Status**: the current `app_ui_plugin.cpp` no longer needs `singleShot` because we now use `app_core.on("statusChanged", ...)` + async getters — neither blocks. **This deviation has been removed.** Documenting it because it tripped us up and others may hit it: **do not make blocking sync calls inside `initLogos`**, even if the docs suggest sync is OK.
+**Upstream**: the canonical config file and the deserializer schema may still be out of sync — re-test against the current storage_module pin before filing. (We didn't re-test in this round; the empty config keeps working so we left it.)
 
 ### 8. `app_ui` C++ backend uses `app_core::statusChanged` event to refresh PROPs
 
 **Doc shows**: the Part 3 calc tutorial has the backend update PROPs internally (e.g., `setStatus("Ready")` in `initLogos`). It doesn't show a multi-module pattern where one Core's state needs to flow into another module's PROPs.
 
-**We do**: `app_ui` C++ backend subscribes to `app_core.on("statusChanged", ...)` and, on each event, calls `app_core.storageStartedAsync(cb)` etc., then `setStorageStarted(v)` in the callback. The setters auto-sync the PROPs over QtRO to the QML replica.
+**We do**: `app_ui` C++ backend subscribes to `m_logos->app_core.on("statusChanged", ...)` and, on each event, calls `app_core.storageStartedAsync(cb)` etc., then `setStorageStarted(v)` in the callback. The setters auto-sync the PROPs over QtRO to the QML replica.
 
-**Why**: it's the natural pattern given the Core+UI separation, but the docs don't show this specific shape. Earlier I had a 1Hz `QTimer` polling instead, which was redundant — PROPs already auto-sync, and we have an event to drive the refresh. The polling was a wrong-pattern artifact of not thinking through the event flow.
+**Why**: it's the natural pattern given the Core+UI separation, but the docs don't show this specific shape. The generated `LogosModules` SDK exposes `module.on(eventName, cb)` for every module — verified in `app_core/result/include/app_core_api.h` and `delivery_module_api.h`. The dev guide §8 doesn't mention this `.on(...)` accessor; it should.
 
-### 9. Storage's `start()` returns `false` even when the threadpool/discovery starts — and we accept it
-
-**Observed**: in some runs (timing-dependent), `m_logos->storage_module.start()` returns `false` even though storage's logs show the threadpool starts, discovery initializes, UPnP succeeds. We treat that as "not started" in the UI.
-
-**Why we accept it**: same root cause as (2) — the IPC return value isn't always meaningful for nodes that do real network work. Documenting but not fixing because storage doesn't expose a clean "ready" event we could subscribe to (see (4)).
-
-**Upstream**: combine with (2)+(4) into one PR — IPC timeout / liveness-signal documentation.
+**Upstream**: worth a docs PR to surface the `.on(eventName, cb)` accessor as the cross-module event-subscription pattern.
 
 ## Project finding: `lgs` docs vs `tutorial-v2`
 
